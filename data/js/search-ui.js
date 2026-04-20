@@ -546,12 +546,61 @@
     if (result.length > 0) {
       return result
     }
+    // Helper: normalize a term for wildcard queries when bypassing the pipeline
+    function normalizeWildcardTerm (term) {
+      const s = typeof term === 'string' ? term : String(term);
+      const lower = s.toLowerCase();
+      // If the query contains delimiters like '_' or '-', prefer stemming the last segment
+      // so that inputs like 'vk_nv_copy' normalize to 'copi' instead of the whole token.
+      const hasDelim = /[_-]/.test(lower);
+      const runPipeline = (str) => {
+        try {
+          const tokens = index && index.pipeline && typeof index.pipeline.runString === 'function'
+            ? index.pipeline.runString(str)
+            : null;
+          if (tokens && tokens.length) {
+            // Prefer the last token (often the stem) else the longest token
+            let candidate = tokens[tokens.length - 1];
+            if (candidate.length < 3) candidate = tokens.reduce((a, b) => (b.length > a.length ? b : a), candidate);
+            return candidate || str
+          }
+        } catch (_) {}
+        return str
+      };
+      if (hasDelim) {
+        const parts = lower.split(/[_-]+/).filter(Boolean);
+        const last = parts.length ? parts[parts.length - 1] : lower;
+        return runPipeline(last)
+      }
+      try {
+        const tokens = index && index.pipeline && typeof index.pipeline.runString === 'function'
+          ? index.pipeline.runString(lower)
+          : null;
+        if (tokens && tokens.length) {
+          // Prefer the last token (often the stem) else the longest token
+          let candidate = tokens[tokens.length - 1];
+          if (candidate.length < 3) candidate = tokens.reduce((a, b) => (b.length > a.length ? b : a), candidate);
+          return candidate || lower
+        }
+      } catch (_) {}
+      return lower
+    }
     // no result, use a begins with search
     result = filter(
       index.query(function (lunrQuery) {
         lunrQuery.clauses = query.clauses.map((clause) => {
           if (clause.presence !== globalThis.lunr.Query.presence.PROHIBITED) {
-            clause.term = clause.term + '*';
+            const original = String(clause.term).toLowerCase();
+            const hasDelim = /[_-]/.test(original);
+            if (hasDelim) {
+              // For underscore/hyphen terms, keep the full-token prefix to
+              // match composite tokens like "vk_nv_copy_memory" during typing.
+              clause.term = original + '*';
+            } else {
+              // Otherwise, use the normalized/stemmed prefix.
+              const term = normalizeWildcardTerm(clause.term);
+              clause.term = term + '*';
+            }
             clause.wildcard = globalThis.lunr.Query.wildcard.TRAILING;
             clause.usePipeline = false;
           }
@@ -568,7 +617,9 @@
       index.query(function (lunrQuery) {
         lunrQuery.clauses = query.clauses.map((clause) => {
           if (clause.presence !== globalThis.lunr.Query.presence.PROHIBITED) {
-            clause.term = '*' + clause.term + '*';
+            const term = normalizeWildcardTerm(clause.term);
+            // For composite tokens, prefer matching the last segment stem as a substring.
+            clause.term = '*' + term + '*';
             clause.wildcard = globalThis.lunr.Query.wildcard.LEADING | globalThis.lunr.Query.wildcard.TRAILING;
             clause.usePipeline = false;
           }
@@ -585,15 +636,48 @@
     if (text.trim() === '') {
       return
     }
+    function maybeSwapVendorOrder (q) {
+      const vendors = ['KHR', 'EXT', 'NV', 'AMD', 'INTEL', 'ARM', 'IMG', 'QCOM', 'SAMSUNG', 'HUAWEI', 'FSL', 'GOOGLE'];
+      const upper = q.toUpperCase();
+      // Vendor_VK_* -> VK_Vendor_*
+      let m = upper.match(/^([A-Z0-9]+)_VK_(.+)$/);
+      if (m && vendors.includes(m[1])) {
+        const vendor = m[1];
+        const rest = q.slice(q.indexOf('_VK_') + 4);
+        return `VK_${vendor}_${rest}`
+      }
+      // VK_Vendor_* -> Vendor_VK_*
+      m = upper.match(/^VK_([A-Z0-9]+)_(.+)$/);
+      if (m && vendors.includes(m[1])) {
+        const vendor = m[1];
+        const idx = q.toUpperCase().indexOf(vendor + '_') + vendor.length + 1;
+        const rest = q.slice(idx);
+        return `${vendor}_VK_${rest}`
+      }
+      return null
+    }
     const maxLevenshteinDistance = 3;
-    const trieResults = trie
-      .searchWithLevenshteinWithData(text.toLowerCase(), maxLevenshteinDistance);
+    // For underscore/hyphen queries, skip trie prefilter to avoid over-restrictive
+    // candidate pruning which can cause churn as the user types.
+    const useTrie = !/[_-]/.test(text);
+    const trieResults = useTrie
+      ? trie.searchWithLevenshteinWithData(text.toLowerCase(), maxLevenshteinDistance)
+      : null;
     let result;
     const recheck = /\s/.test(text);
     if (!trieResults) {
       result = search(index, store.documents, text);
       if (recheck) {
         result = search(index, store.documents, text.replace(/\s/g, '_'));
+      }
+      if (!result || result.length === 0) {
+        const swapped = maybeSwapVendorOrder(text);
+        if (swapped) {
+          result = search(index, store.documents, swapped);
+          if (recheck && (!result || result.length === 0)) {
+            result = search(index, store.documents, swapped.replace(/\s/g, '_'));
+          }
+        }
       }
     } else {
       // Extract unique document IDs from Trie results
@@ -611,8 +695,8 @@
           // Rebuild a temporary index only with the filtered documents
           const tempLunrIndex = globalThis.lunr(function () {
             this.ref('id');
+            this.field('name', { boost: 15 });
             this.field('title', { boost: 10 });
-            this.field('name');
             this.field('text');
             this.field('component');
             this.field('keyword', { boost: 5 });
@@ -635,6 +719,15 @@
         }
       }
       result = lunrResults;
+      if (!result || result.length === 0) {
+        const swapped = maybeSwapVendorOrder(text);
+        if (swapped) {
+          result = search(index, store.documents, swapped);
+          if (recheck && (!result || result.length === 0)) {
+            result = search(index, store.documents, swapped.replace(/\s/g, '_'));
+          }
+        }
+      }
     }
     const searchResultDataset = document.createElement('div');
     searchResultDataset.classList.add('search-result-dataset');
@@ -916,13 +1009,34 @@
       if (result.length === 0 && /\s/.test(query)) {
         result = search(mod.index, mod.store.documents, query.replace(/\s/g, '_'));
       }
-      const dataset = document.createElement('div');
-      dataset.classList.add('search-result-dataset');
+      if (result.length === 0) {
+        // Zero-hit query: try vendor order swap
+        const vendors = ['KHR', 'EXT', 'NV', 'AMD', 'INTEL', 'ARM', 'IMG', 'QCOM', 'SAMSUNG', 'HUAWEI', 'FSL', 'GOOGLE'];
+        const upper = query.toUpperCase();
+        let swapped = null;
+        let m = upper.match(/^([A-Z0-9]+)_VK_(.+)$/);
+        if (m && vendors.includes(m[1])) swapped = `VK_${m[1]}_${query.slice(query.indexOf('_VK_') + 4)}`;
+        if (!swapped) {
+          m = upper.match(/^VK_([A-Z0-9]+)_(.+)$/);
+          if (m && vendors.includes(m[1])) {
+            const restIndex = query.toUpperCase().indexOf(`${m[1]}_`) + (m[1].length + 1);
+            swapped = `${m[1]}_VK_${query.slice(restIndex)}`;
+          }
+        }
+        if (swapped) {
+          result = search(mod.index, mod.store.documents, swapped);
+          if (result.length === 0 && /\s/.test(query)) {
+            result = search(mod.index, mod.store.documents, swapped.replace(/\s/g, '_'));
+          }
+        }
+      }
       if (result.length > 0) {
+        const dataset = document.createElement('div');
+        dataset.classList.add('search-result-dataset');
         any = true;
         createSearchResult(result, mod.store, dataset);
+        frag.appendChild(dataset);
       }
-      frag.appendChild(dataset);
     }
     if (!any) {
       const dataset = document.createElement('div');
