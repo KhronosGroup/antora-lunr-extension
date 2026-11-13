@@ -301,6 +301,8 @@ The indexer treats every listing block that has an anchor as a section titled by
 It ranks like a section title, and the search result links straight to the block.
 The block's content stays in the page text, so no markup changes are needed for this.
 
+If a notice sits above the declaration (for example a legacy functionality warning) and the anchor is on that notice, the anchored admonition is indexed when it is directly followed by an unanchored listing block.
+
 To rank any other anchored block (a table, a figure, an admonition) like a section title, add the `search-boost` role.
 Blocks with this role get a higher weight than automatically indexed listing blocks.
 
@@ -323,6 +325,29 @@ The content of the block is still indexed as page text.
 long generated output
 ----
 -----
+
+=== Order of components in search results
+
+By default, search results are grouped by component in the order the components are listed in the search index.
+To control the order, set the `component_order` configuration key to a list of component names, highest priority first:
+
+.antora-playbook.yml
+[,yaml]
+----
+antora:
+  extensions:
+  - require: '@antora/lunr-extension'
+    component_order:
+    - spec
+    - refpages
+    - guide
+    - samples
+----
+
+Components that are not in the list are shown after the ones that are, in their default order.
+A name that is not a component in the site is ignored with a warning.
+The extension records each component's position as `order` in `search-index/manifest.json`, and the search UI shows the result groups sorted by it.
+A UI that does not use the manifest keeps the default order.
 
 === Snippet length
 

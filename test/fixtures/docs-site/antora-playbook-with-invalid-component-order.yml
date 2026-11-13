@@ -1,0 +1,17 @@
+antora:
+  extensions:
+  - require: '@antora/lunr-extension'
+    component_order: foo
+site:
+  title: Antora x Lunr Documentation
+  url: https://antora-x-lunr.example.org
+  start_page: antora-lunr::index.adoc
+content:
+  sources:
+  - url: ./../../..
+    branches: HEAD
+    start_path: test/fixtures/docs-site
+ui:
+  bundle:
+    url: https://gitlab.com/antora/antora-ui-default/-/jobs/artifacts/HEAD/raw/build/ui-bundle.zip?job=bundle-stable
+    snapshot: true

@@ -981,6 +981,37 @@ describe('generateIndex()', () => {
       expect(score(' search-boost')).to.be.greaterThan(score(''))
     })
 
+    it('should index an anchored admonition directly followed by an unanchored listing block', () => {
+      const index = build(`
+        <div id="vkQueueSubmit" class="admonitionblock warning"><table><tr><td>Legacy</td></tr></table></div>
+        <div class="listingblock"><div class="content"><pre><code>VkResult vkQueueSubmit(void);</code></pre></div></div>`)
+      const entry = index.store.documents['1'].titles.find((t) => t.hash === 'vkQueueSubmit')
+      expect(entry).to.include({ text: 'vkQueueSubmit', kind: 'listing' })
+      expect(index.index.search('vkQueueSubmit')[0].ref).to.equal(`1-${entry.id}`)
+    })
+
+    it('should not index an anchored admonition that is not followed by a listing block', () => {
+      const index = build(`
+        <div id="note-1" class="admonitionblock note"><table><tr><td>x</td></tr></table></div>
+        <div class="paragraph"><p>text</p></div>`)
+      expect(index.store.documents['1'].titles.filter((t) => t.kind)).to.have.lengthOf(0)
+    })
+
+    it('should not index an admonition with a generated id before a listing block', () => {
+      const index = build(`
+        <div id="_example_3" class="admonitionblock note"><table><tr><td>x</td></tr></table></div>
+        <div class="listingblock"><div class="content"><pre><code>x</code></pre></div></div>`)
+      expect(index.store.documents['1'].titles.filter((t) => t.kind)).to.have.lengthOf(0)
+    })
+
+    it('should not index an admonition when the listing block that follows has its own anchor', () => {
+      const index = build(`
+        <div id="vkNote" class="admonitionblock note"><table><tr><td>x</td></tr></table></div>
+        ${declaration('vkOwn')}`)
+      const hashes = index.store.documents['1'].titles.filter((t) => t.kind).map((t) => t.hash)
+      expect(hashes).to.deep.equal(['vkOwn'])
+    })
+
     it('should skip blocks marked with search-exclude, including nested ones', () => {
       const index = build(`
         <div id="vkSkipped" class="listingblock search-exclude"><div class="content"><pre><code>x</code></pre></div></div>
@@ -994,6 +1025,61 @@ describe('generateIndex()', () => {
       const index = build(declaration('vkCreateInstance'))
       const files = generateIndex.createMarkdownIndexFile(index)
       expect(files[0].contents.toString()).to.not.include('[vkCreateInstance]')
+    })
+  })
+
+  describe('Component order in the split index manifest', () => {
+    const page = (component, text) => ({
+      contents: Buffer.from(`<html lang="en"><head><meta charset="utf-8"><title>T</title></head>
+        <body class="article"><main role="main"><article class="doc"><h1 class="page">${component}</h1>
+        <p>${text}</p></article></main></body></html>`),
+      src: { component, version: '1.0', relative: `${component}.adoc` },
+    })
+    const manifestFor = (componentOrder) => {
+      playbook.urls = { htmlExtensionStyle: 'indexify' }
+      const contentCatalog = buildContentCatalog(playbook, [
+        page('guide', 'guide text'),
+        page('glsl', 'glsl text'),
+        page('spec', 'spec text'),
+        page('samples', 'samples text'),
+      ])
+      const index = generateIndex(playbook, contentCatalog)
+      const files = generateIndex.createSplitIndexFiles(index, { componentOrder })
+      const manifest = JSON.parse(files.find((file) => file.out.path === 'search-index/manifest.json').contents)
+      return Object.fromEntries(manifest.modules.map((it) => [it.component, it]))
+    }
+
+    it('should add an order to each module in the configured order', () => {
+      const modules = manifestFor(['spec', 'guide', 'samples', 'glsl'])
+      expect(Object.fromEntries(Object.entries(modules).map(([name, it]) => [name, it.order]))).to.deep.equal({
+        spec: 0,
+        guide: 1,
+        samples: 2,
+        glsl: 3,
+      })
+    })
+
+    it('should put components that are not listed after the listed ones', () => {
+      const modules = manifestFor(['spec', 'guide'])
+      expect(modules.spec.order).to.equal(0)
+      expect(modules.guide.order).to.equal(1)
+      expect(modules.glsl.order).to.equal(2)
+      expect(modules.samples.order).to.equal(2)
+    })
+
+    it('should not add an order when no order is configured', () => {
+      Object.values(manifestFor(undefined)).forEach((it) => expect(it).to.not.have.property('order'))
+      Object.values(manifestFor([])).forEach((it) => expect(it).to.not.have.property('order'))
+    })
+
+    it('should keep the modules in the same order in the manifest', () => {
+      playbook.urls = { htmlExtensionStyle: 'indexify' }
+      const contentCatalog = buildContentCatalog(playbook, [page('guide', 'a'), page('spec', 'b')])
+      const index = generateIndex(playbook, contentCatalog)
+      const read = (opts) => JSON.parse(
+        generateIndex.createSplitIndexFiles(index, opts).find((file) => file.out.path === 'search-index/manifest.json').contents
+      ).modules.map((it) => it.component)
+      expect(read({ componentOrder: ['spec', 'guide'] })).to.deep.equal(read({}))
     })
   })
 
