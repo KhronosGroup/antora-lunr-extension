@@ -906,6 +906,183 @@ describe('generateIndex()', () => {
     ).to.have.lengthOf(1)
   })
 
+  describe('Anchored blocks', () => {
+    const page = (body) => Buffer.from(`
+      <html lang="en"><head><meta charset="utf-8"><title>T</title></head>
+      <body class="article"><main role="main"><article class="doc">
+        <h1 class="page">Initialization</h1>
+        <div class="sect1">
+          <h2 id="initialization">Initialization</h2>
+          <div class="sectionbody">${body}</div>
+        </div>
+      </article></main></body></html>`)
+
+    const build = (body) => {
+      playbook.urls = { htmlExtensionStyle: 'indexify' }
+      const contentCatalog = buildContentCatalog(playbook, [
+        { contents: page(body), src: { component: 'spec', version: '1.0' } },
+      ])
+      return generateIndex(playbook, contentCatalog)
+    }
+
+    const declaration = (id) => `
+      <div id="${id}" class="listingblock"><div class="content">
+        <pre class="highlight"><code>VkResult ${id}(void);</code></pre>
+      </div></div>`
+
+    it('should index anchored listing blocks as sections titled by their anchor', () => {
+      const index = build(`<div class="paragraph"><p>To create an instance, call:</p></div>${declaration('vkCreateInstance')}`)
+      const titles = index.store.documents['1'].titles
+      const entry = titles.find((t) => t.hash === 'vkCreateInstance')
+      expect(entry).to.include({ text: 'vkCreateInstance', hash: 'vkCreateInstance', kind: 'listing' })
+      const results = index.index.search('vkCreateInstance')
+      expect(results[0].ref).to.equal(`1-${entry.id}`)
+    })
+
+    it('should rank the anchored block above a page that only mentions the name in body text', () => {
+      playbook.urls = { htmlExtensionStyle: 'indexify' }
+      const contentCatalog = buildContentCatalog(playbook, [
+        { contents: page('<div class="paragraph"><p>vkCreateInstance vkCreateInstance vkCreateInstance</p></div>'), src: { component: 'spec', version: '1.0', module: 'ROOT', relative: 'a.adoc' } },
+        { contents: page(declaration('vkCreateInstance')), src: { component: 'spec', version: '1.0', module: 'ROOT', relative: 'b.adoc' } },
+      ])
+      const index = generateIndex(playbook, contentCatalog)
+      const [top] = index.index.search('vkCreateInstance')
+      const [docId, titleId] = top.ref.split('-')
+      expect(titleId, 'top hit must be a section entry').to.exist()
+      const hit = index.store.documents[docId].titles.find((t) => String(t.id) === titleId)
+      expect(hit.hash).to.equal('vkCreateInstance')
+    })
+
+    it('should keep the block content in the page text', () => {
+      const index = build(declaration('vkCreateInstance'))
+      expect(index.store.documents['1'].text).to.include('VkResult vkCreateInstance(void);')
+    })
+
+    it('should not index listing blocks without an anchor', () => {
+      const index = build('<div class="listingblock"><div class="content"><pre><code>x</code></pre></div></div>')
+      expect(index.store.documents['1'].titles.filter((t) => t.kind)).to.have.lengthOf(0)
+    })
+
+    it('should index any anchored block with the search-boost role and weight it higher', () => {
+      const index = build(`
+        ${declaration('vkPlain')}
+        <table id="limits-table" class="tableblock search-boost"><tr><td>x</td></tr></table>
+      `)
+      const titles = index.store.documents['1'].titles
+      const boosted = titles.find((t) => t.hash === 'limits-table')
+      expect(boosted.kind).to.equal('boost')
+      const plain = titles.find((t) => t.hash === 'vkPlain')
+      expect(plain.kind).to.equal('listing')
+    })
+
+    it('should score a search-boost block higher than an identical plain block', () => {
+      const body = (cls) => `<div id="vkThing" class="listingblock${cls}"><div class="content"><pre><code>x</code></pre></div></div>`
+      const score = (cls) => build(body(cls)).index.search('vkThing').find((r) => r.ref.includes('-')).score
+      expect(score(' search-boost')).to.be.greaterThan(score(''))
+    })
+
+    it('should index an anchored admonition directly followed by an unanchored listing block', () => {
+      const index = build(`
+        <div id="vkQueueSubmit" class="admonitionblock warning"><table><tr><td>Legacy</td></tr></table></div>
+        <div class="listingblock"><div class="content"><pre><code>VkResult vkQueueSubmit(void);</code></pre></div></div>`)
+      const entry = index.store.documents['1'].titles.find((t) => t.hash === 'vkQueueSubmit')
+      expect(entry).to.include({ text: 'vkQueueSubmit', kind: 'listing' })
+      expect(index.index.search('vkQueueSubmit')[0].ref).to.equal(`1-${entry.id}`)
+    })
+
+    it('should not index an anchored admonition that is not followed by a listing block', () => {
+      const index = build(`
+        <div id="note-1" class="admonitionblock note"><table><tr><td>x</td></tr></table></div>
+        <div class="paragraph"><p>text</p></div>`)
+      expect(index.store.documents['1'].titles.filter((t) => t.kind)).to.have.lengthOf(0)
+    })
+
+    it('should not index an admonition with a generated id before a listing block', () => {
+      const index = build(`
+        <div id="_example_3" class="admonitionblock note"><table><tr><td>x</td></tr></table></div>
+        <div class="listingblock"><div class="content"><pre><code>x</code></pre></div></div>`)
+      expect(index.store.documents['1'].titles.filter((t) => t.kind)).to.have.lengthOf(0)
+    })
+
+    it('should not index an admonition when the listing block that follows has its own anchor', () => {
+      const index = build(`
+        <div id="vkNote" class="admonitionblock note"><table><tr><td>x</td></tr></table></div>
+        ${declaration('vkOwn')}`)
+      const hashes = index.store.documents['1'].titles.filter((t) => t.kind).map((t) => t.hash)
+      expect(hashes).to.deep.equal(['vkOwn'])
+    })
+
+    it('should skip blocks marked with search-exclude, including nested ones', () => {
+      const index = build(`
+        <div id="vkSkipped" class="listingblock search-exclude"><div class="content"><pre><code>x</code></pre></div></div>
+        <div class="openblock search-exclude"><div class="content">${declaration('vkNested')}</div></div>
+        ${declaration('vkKept')}`)
+      const hashes = index.store.documents['1'].titles.filter((t) => t.kind).map((t) => t.hash)
+      expect(hashes).to.deep.equal(['vkKept'])
+    })
+
+    it('should leave anchored block entries out of the markdown table of contents', () => {
+      const index = build(declaration('vkCreateInstance'))
+      const files = generateIndex.createMarkdownIndexFile(index)
+      expect(files[0].contents.toString()).to.not.include('[vkCreateInstance]')
+    })
+  })
+
+  describe('Component order in the split index manifest', () => {
+    const page = (component, text) => ({
+      contents: Buffer.from(`<html lang="en"><head><meta charset="utf-8"><title>T</title></head>
+        <body class="article"><main role="main"><article class="doc"><h1 class="page">${component}</h1>
+        <p>${text}</p></article></main></body></html>`),
+      src: { component, version: '1.0', relative: `${component}.adoc` },
+    })
+    const manifestFor = (componentOrder) => {
+      playbook.urls = { htmlExtensionStyle: 'indexify' }
+      const contentCatalog = buildContentCatalog(playbook, [
+        page('guide', 'guide text'),
+        page('glsl', 'glsl text'),
+        page('spec', 'spec text'),
+        page('samples', 'samples text'),
+      ])
+      const index = generateIndex(playbook, contentCatalog)
+      const files = generateIndex.createSplitIndexFiles(index, { componentOrder })
+      const manifest = JSON.parse(files.find((file) => file.out.path === 'search-index/manifest.json').contents)
+      return Object.fromEntries(manifest.modules.map((it) => [it.component, it]))
+    }
+
+    it('should add an order to each module in the configured order', () => {
+      const modules = manifestFor(['spec', 'guide', 'samples', 'glsl'])
+      expect(Object.fromEntries(Object.entries(modules).map(([name, it]) => [name, it.order]))).to.deep.equal({
+        spec: 0,
+        guide: 1,
+        samples: 2,
+        glsl: 3,
+      })
+    })
+
+    it('should put components that are not listed after the listed ones', () => {
+      const modules = manifestFor(['spec', 'guide'])
+      expect(modules.spec.order).to.equal(0)
+      expect(modules.guide.order).to.equal(1)
+      expect(modules.glsl.order).to.equal(2)
+      expect(modules.samples.order).to.equal(2)
+    })
+
+    it('should not add an order when no order is configured', () => {
+      Object.values(manifestFor(undefined)).forEach((it) => expect(it).to.not.have.property('order'))
+      Object.values(manifestFor([])).forEach((it) => expect(it).to.not.have.property('order'))
+    })
+
+    it('should keep the modules in the same order in the manifest', () => {
+      playbook.urls = { htmlExtensionStyle: 'indexify' }
+      const contentCatalog = buildContentCatalog(playbook, [page('guide', 'a'), page('spec', 'b')])
+      const index = generateIndex(playbook, contentCatalog)
+      const read = (opts) => JSON.parse(
+        generateIndex.createSplitIndexFiles(index, opts).find((file) => file.out.path === 'search-index/manifest.json').contents
+      ).modules.map((it) => it.component)
+      expect(read({ componentOrder: ['spec', 'guide'] })).to.deep.equal(read({}))
+    })
+  })
+
   describe('Paths', () => {
     it('should use relative links when site URL is not defined', () => {
       delete playbook.site.url

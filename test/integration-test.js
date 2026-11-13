@@ -392,6 +392,42 @@ describe('generateSite()', () => {
     ).to.throw(expectedMessage)
   })
 
+  it('should throw error if component_order is not a list of component names', async () => {
+    const playbookFile = ospath.join(
+      FIXTURES_DIR,
+      'docs-site',
+      'antora-playbook-with-invalid-component-order.yml'
+    )
+    const expectedMessage =
+      'The component_order option for @antora/lunr-extension must be a list of component names'
+    expect(
+      await generateSite(['--playbook', playbookFile], {}).then(
+        (result) => () => result,
+        (err) => () => {
+          throw err
+        }
+      )
+    ).to.throw(expectedMessage)
+  })
+
+  it('should record the configured component order in the search index manifest', async () => {
+    const playbookFile = ospath.join(
+      FIXTURES_DIR,
+      'docs-site',
+      'antora-playbook-with-component-order.yml'
+    )
+    await generateSite(
+      ['--playbook', playbookFile, '--to-dir', outputDir, '--cache-dir', cacheDir, '--quiet'],
+      {}
+    )
+    const manifest = JSON.parse(
+      await fsp.readFile(ospath.join(outputDir, 'search-index/manifest.json'), 'utf8')
+    )
+    const entry = manifest.modules.find((it) => it.component === 'antora-lunr')
+    // "missing-component" is listed first but is not in the site, so antora-lunr is second.
+    expect(entry.order).to.equal(1)
+  })
+
   it('should output search.css to css directory of UI output folder', async () => {
     await generateSite(
       [
