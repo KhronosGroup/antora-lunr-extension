@@ -292,6 +292,38 @@ asciidoc:
 The indexer will also look for the `robots` meta tag in HTML document and exclude the page if the value of the content attribute is `noindex`.
 That allows you to exclude pages that were either not created from AsciiDoc or that contain a meta robots tag that was added by the UI template based on another condition.
 
+=== Anchored blocks
+
+Some content is searched for by name even though it isn't a section.
+The API declarations in the Vulkan specification are an example: each is a source block with an anchor, such as `[[vkCreateInstance]]`.
+
+The indexer treats every listing block that has an anchor as a section titled by that anchor.
+It ranks like a section title, and the search result links straight to the block.
+The block's content stays in the page text, so no markup changes are needed for this.
+
+To rank any other anchored block (a table, a figure, an admonition) like a section title, add the `search-boost` role.
+Blocks with this role get a higher weight than automatically indexed listing blocks.
+
+[,asciidoc]
+----
+[#limits-table.search-boost]
+|===
+| Limit | Value
+|===
+----
+
+To keep an anchored block, or anything inside it, out of the section entries, add the `search-exclude` role.
+The content of the block is still indexed as page text.
+
+[,asciidoc]
+-----
+[#generated-listing.search-exclude]
+[source]
+----
+long generated output
+----
+-----
+
 === Snippet length
 
 By default, the maximum length of a snippet in a search result is 100 characters.

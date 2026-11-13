@@ -9,6 +9,8 @@ For a detailed view of what's changed, refer to the {url-repo}/commits[commit hi
 === Added
 
 * Index page keywords (#87)
+* Index anchored listing blocks (such as API declarations) as sections titled by their anchor
+* Add `search-boost` and `search-exclude` roles to raise or drop the ranking of an anchored block
 
 === Changed
 
